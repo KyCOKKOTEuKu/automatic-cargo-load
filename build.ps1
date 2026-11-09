@@ -12,7 +12,7 @@ try {
     & $tcc -shared -o build/version.dll version_proxy.c -lkernel32
     if ($LASTEXITCODE -ne 0) { throw 'Failed to build version.dll.' }
 
-    Copy-Item -LiteralPath RoadCraftAutoload.profiles -Destination build
+    Copy-Item -LiteralPath RoadCraftAutoload.profiles,RoadCraftAutoload.ini -Destination build
 } finally {
     Pop-Location
 }

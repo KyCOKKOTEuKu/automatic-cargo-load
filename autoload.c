@@ -43,8 +43,9 @@ static Item logs[128],truck;
 static int count,selected=-1,truckReady;
 static uintptr_t selectedBody,world;
 static char message[180]="Refresh to find nearby cargo";
-static float rear=3.5f,height=5.0f,range=25.0f;
-static float mapScale=10.0f;
+static float rear=3.5f,height=5.0f;
+static const float scanRange=45.0f,loadRange=25.0f;
+static float mapScale=3.4f;
 typedef struct {
  uintptr_t body,shape;
  BYTE originalMotion;
@@ -255,6 +256,32 @@ static float cargoGeometryError(const CargoAsset *asset,const CargoPoint *minima
  }
  return error;
 }
+static int primitiveWaterPipe(uintptr_t body){
+ uintptr_t shape,type,children[2][4];
+ Array list;
+ float cylinderRadius,capsuleRadius;
+ Vec cylinder[2],capsule[2];
+ int i;
+ if(!readmem(body+0x20,&shape,8) || !readmem(shape,&type,8) || type!=(uintptr_t)base+0x3ea5808
+    || !readmem(shape+0x38,&list,sizeof(list)) || list.n!=2 || (list.cap&0x3fffffff)<2
+    || !readmem(list.p,children,sizeof(children)))return 0;
+ for(i=0;i<2;i++){
+  shape=children[i][0];
+  if(!readmem(shape,&type,8))return 0;
+  if(type==(uintptr_t)base+0x3ea8b38 && !readmem(shape+0x38,&children[i][0],8))return 0;
+ }
+ /* The authored 3.8 m water pipe uses a cylinder and a capsule instead of mesh hulls. */
+ return readmem(children[0][0],&type,8) && type==(uintptr_t)base+0x3ea9b10
+     && readmem(children[0][0]+0x30,&cylinderRadius,4) && nearFloat(cylinderRadius,0.5f)
+     && readmem(children[0][0]+0x44,cylinder,sizeof(cylinder))
+     && nearFloat(cylinder[0].x,-1.9f) && nearFloat(cylinder[1].x,1.9f)
+     && nearFloat(cylinder[0].z,0.52f) && nearFloat(cylinder[1].z,0.52f)
+     && readmem(children[1][0],&type,8) && type==(uintptr_t)base+0x3ea8f30
+     && readmem(children[1][0]+0x28,&capsuleRadius,4) && nearFloat(capsuleRadius,0.52f)
+     && readmem(children[1][0]+0x34,capsule,sizeof(capsule))
+     && nearFloat(capsule[0].x,-1.4f) && nearFloat(capsule[1].x,1.4f)
+     && nearFloat(capsule[0].z,0.52f) && nearFloat(capsule[1].z,0.52f);
+}
 static int cargoAssetKind(uintptr_t body,float inverseMass,const char *bone){
  CargoPoint minima[MAX_CARGO_HULLS];
  int i,n=0,best=-1;
@@ -273,11 +300,15 @@ static int cargoAssetKind(uintptr_t body,float inverseMass,const char *bone){
  return best<0?-1:FIRST_ASSET_KIND+best;
 }
 static int cargoKind(uintptr_t body,Vec inertia,uintptr_t userdata){uintptr_t name;char bone[64];int i;
- if(userdata!=5)return -1;
- if(absf(inertia.w-1.0f/1100)<0.0000001f && inertia.x>0 && inertia.z>0 && inertia.y>50*inertia.x && inertia.y>50*inertia.z)return 0;
+ /* Some catalogued props use different body tags depending on how they spawn.
+    Require the asset's shape for these tags and keep legacy profiles scoped to tag 5. */
+ if(userdata<5 || userdata>11)return -1;
+ if(userdata==5 && absf(inertia.w-1.0f/1100)<0.0000001f && inertia.x>0 && inertia.z>0 && inertia.y>50*inertia.x && inertia.y>50*inertia.z)return 0;
  if(!readmem(body+0xb8,&name,8)||!readmem(name&~(uintptr_t)1,bone,16))return -1;
- if(!memcmp(bone,"geo_body\0",9)){
+ if(userdata==5 && !memcmp(bone,"geo_body\0",9)){
   for(i=0;i<profileCount;i++){CargoProfile *p=&profiles[i];if(nearFloat(inertia.w,1/p->mass)&&nearFloat(inertia.x,p->ix)&&nearFloat(inertia.y,p->iy)&&nearFloat(inertia.z,p->iz))return i+1;}
+  if(nearFloat(inertia.w,1/cargoAssets[PRIMITIVE_WATER_PIPE_ASSET].mass) && primitiveWaterPipe(body))
+   return FIRST_ASSET_KIND+PRIMITIVE_WATER_PIPE_ASSET;
  }
  if(!memchr(bone,0,16)){
   if(!readmem((name&~(uintptr_t)1)+16,bone+16,sizeof(bone)-16))return -1;
@@ -310,8 +341,10 @@ static DWORD cameraSearchTime;
 static int cameraSearchPending;
 static int readVehicleFocus(uintptr_t camera,Vec *focus){
  uintptr_t vtable,tracker;
- BYTE flags;
+ BYTE followMode,flags;
  return readmem(camera,&vtable,8) && vtable==(uintptr_t)base+0x38c66e0
+        /* Other camera modes can retain a tracker and stale truck coordinates. */
+        && readmem(camera+0x28,&followMode,1) && followMode==1
         && readmem(camera+0x30,&tracker,8) && tracker
         && readmem(tracker+8,&flags,1) && !(flags&4)
         && readmem(camera+0x128,focus,12)
@@ -322,8 +355,7 @@ static DWORD WINAPI findVehicleCamera(void *arg){
  QueryWorkingSetFn query=(QueryWorkingSetFn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"K32QueryWorkingSet");
  DWORD capacity=8*1024*1024;
  uintptr_t *pages=0,found=0;
- static const uintptr_t alignments[]={0x10000,0x8000,0x1000};
- int pass;
+ uintptr_t i;
  (void)arg;
  if(!query)goto done;
  while(capacity<=64*1024*1024){
@@ -337,19 +369,12 @@ static DWORD WINAPI findVehicleCamera(void *arg){
  if(capacity>64*1024*1024 || pages[0]>=capacity/sizeof(*pages))goto done;
  /* Camera allocations start on a page. Reading only resident page headers
     avoids copying whole heaps and works across differently sized regions. */
- for(pass=0;pass<3;pass++){
-  uintptr_t i;
-  for(i=1;i<=pages[0];i++){
-   uintptr_t entry=pages[i],page=entry&~(uintptr_t)0xfff,vtable;
-   Vec focus;
-   if((entry&0x100) || (page&(alignments[pass]-1))
-      || (pass && !(page&(alignments[pass-1]-1))))continue;
-   if(!readmem(page,&vtable,8) || vtable!=(uintptr_t)base+0x38c66e0
-      || !readVehicleFocus(page,&focus))continue;
-   if(found && found!=page){found=0;goto done;}
-   found=page;
-  }
-  if(found)break;
+ for(i=1;i<=pages[0];i++){
+  uintptr_t entry=pages[i],page=entry&~(uintptr_t)0xfff;
+  Vec focus;
+  if((entry&0x100) || !readVehicleFocus(page,&focus))continue;
+  if(found && found!=page){found=0;goto done;}
+  found=page;
  }
 done:
  free(pages);
@@ -427,6 +452,25 @@ static int automaticTruckIndex(void){
  detectedTruck=truckTargets[bed>=0?bed:best].profile->label;
  return bed>=0?bed:best;
 }
+static float cargoDistanceSquared(const Item *item){
+ float dx=item->center.x-truck.center.x,dz=item->center.z-truck.center.z;
+ return dx*dx+dz*dz;
+}
+static int compareCargoDistance(const void *left,const void *right){
+ const Item *a=left,*b=right;
+ float da=cargoDistanceSquared(a),db=cargoDistanceSquared(b);
+ if(da<db)return -1;
+ if(da>db)return 1;
+ return (a->body>b->body)-(a->body<b->body);
+}
+static void orderCargo(void){
+ int i;
+ qsort(logs,count,sizeof(logs[0]),compareCargoDistance);
+ selected=-1;
+ for(i=0;i<count;i++)if(logs[i].body==selectedBody){selected=i;break;}
+ if(selected<0 && count){selected=0;selectedBody=logs[0].body;}
+ if(!count)selectedBody=0;
+}
 static void refresh(void){
  uintptr_t islands[4096],bodies[4096],previousWorld=world;
  int ni,i,j,k,bn,pass;
@@ -442,7 +486,7 @@ static void refresh(void){
  for(pass=0;pass<2;pass++){
  for(i=0;i<ni;i++){bn=array(islands[i]+0x68,bodies,4096);for(j=0;j<bn;j++){
   Vec inertia;Item item;uintptr_t userdata;if(!pose(bodies[j],&item))continue;
-  if(pass && length(item.center.x-truck.center.x,item.center.z-truck.center.z)>range)continue;
+  if(pass && length(item.center.x-truck.center.x,item.center.z-truck.center.z)>scanRange)continue;
   if(!readmem(bodies[j]+0x220,&inertia,16) || !readmem(bodies[j]+0x10,&userdata,8))continue;
   if(!pass){
    const TruckProfile *profile=truckProfileFor(item.body,inertia);
@@ -473,11 +517,8 @@ static void refresh(void){
   truckReady=1;
  }
  }
- /* Stable IDs during refresh: selection must not silently jump to another log. */
- selected=-1;for(i=0;i<count;i++)if(logs[i].body==selectedBody)selected=i;
- if(selected<0 && count){selected=0;selectedBody=logs[0].body;}
- if(!count)selectedBody=0;
- sprintf(message,"%d cargo objects nearby. Click to select.",count);
+ orderCargo();
+ sprintf(message,"%d cargo objects within %.0f m. Click to select.",count,scanRange);
 }
 static void cycle(int step){if(!count || placement.body)return;selected=(selected+step+count)%count;selectedBody=logs[selected].body;InvalidateRect(window,0,TRUE);}
 static int cargoLoadingPose(Item *t,const TruckProfile *profile,Vec com,int forward,int up,int upSign,Vec *position,Vec *rotation,Vec *center){float fx=t->pose[8],fz=t->pose[10],n=length(fx,fz),m[3][3],cols[3][3]={{0}},q[4]={0},trace,s;int i,j,k,other;
@@ -596,8 +637,7 @@ static int installKeyboardFilter(void){
  VirtualProtect(slot,sizeof(*slot),protection,&ignored);
  return current==update;
 }
-static void removeStickDrift(SHORT *x,SHORT *y){
- const float deadzone=5000.0f;
+static void removeStickDrift(SHORT *x,SHORT *y,float deadzone){
  float horizontal=*x,vertical=*y;
  if(horizontal*horizontal+vertical*vertical<deadzone*deadzone)*x=*y=0;
 }
@@ -622,8 +662,8 @@ static DWORD WINAPI filterGamepad(DWORD index,PadSample *sample){
   ZeroMemory(&sample->input,sizeof(sample->input));
   return result;
  }
- removeStickDrift(&sample->input.lx,&sample->input.ly);
- removeStickDrift(&sample->input.rx,&sample->input.ry);
+ removeStickDrift(&sample->input.lx,&sample->input.ly,5000.0f);
+ removeStickDrift(&sample->input.rx,&sample->input.ry,6500.0f);
  if(foreground==target){
   sample->input.buttons&=~(PAD_DPAD|PAD_LB|PAD_RB|PAD_A);
   sample->input.lt=sample->input.rt=0;
@@ -712,6 +752,7 @@ static int finishPlacement(int cancel){
   }
  }
  placement.body=0;
+ orderCargo();
  placementControls();
  return 1;
 }
@@ -838,7 +879,10 @@ static void loadSelected(void){
   strcpy(message,"Target truck changed. Refresh first.");goto done;
  }
  if(!readmem(selectedBody+0x220,&inertia,16) || !readmem(selectedBody+0x10,&userdata,8) || cargoKind(selectedBody,inertia,userdata)!=logs[selected].kind){strcpy(message,"Cargo identity changed. Refresh first.");goto done;}
- if(length(current.center.x-t.center.x,current.center.z-t.center.z)>range){strcpy(message,"Selected cargo moved outside range");goto done;}
+ if(length(current.center.x-t.center.x,current.center.z-t.center.z)>loadRange){
+  sprintf(message,"Move within %.0f m of the selected cargo to load it.",loadRange);
+  goto done;
+ }
  kind=logs[selected].kind;
  if(kind>=FIRST_ASSET_KIND && cargoAssets[kind-FIRST_ASSET_KIND].multipleBodies){
   strcpy(message,"Cargo has multiple physics bodies. Load it with the crane.");
@@ -1069,7 +1113,7 @@ static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){int i;
   SetWindowPos(h,0,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);
   return 0;
  }
- if(m==0x020a){mapScale*=((short)HIWORD(w)>0)?1.25f:0.8f;if(mapScale<4)mapScale=4;if(mapScale>35)mapScale=35;InvalidateRect(h,0,TRUE);return 0;}
+ if(m==0x020a){mapScale*=((short)HIWORD(w)>0)?1.25f:0.8f;if(mapScale<3.4f)mapScale=3.4f;if(mapScale>35)mapScale=35;InvalidateRect(h,0,TRUE);return 0;}
  if(m==WM_APP+2){
   cameraSearchPending=0;
   vehicleCamera=(uintptr_t)w;
