@@ -28,3 +28,5 @@ Click **Load** or press **A** to hold the selected object above the bed. The rad
 | Drop and reopen radar | Enter | A |
 
 **Esc** cancels placement and returns the cargo to its starting position. The radar can identify some objects made of multiple physics bodies that still require the crane for loading.
+
+Demo - https://www.youtube.com/watch?v=CeRYsmqoq8Q
