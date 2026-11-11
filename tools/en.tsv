@@ -1,0 +1,161 @@
+Шасси грузовика	Truck chassis
+Ожидание карты	Waiting for map
+Нажмите «Обновить», чтобы найти грузы рядом	Press “Refresh” to find nearby cargo
+справа от уложенных	right of the loaded cargo
+слева от уложенных	left of the loaded cargo
+ряд заполнен — по центру, новым ярусом сверху	row is full — centred, new layer on top
+Включена	Enabled
+Сброс	Reset
+Клавиши	Keys
+Показать / скрыть окно	Show / hide window
+Груз вперёд	Cargo forward
+Груз влево	Cargo left
+Груз назад	Cargo back
+Груз вправо	Cargo right
+Повернуть влево	Rotate left
+Повернуть вправо	Rotate right
+Поднять выше	Raise
+Опустить ниже	Lower
+Отпустить груз	Release cargo
+Отменить и вернуть груз	Cancel and return cargo
+Точный шаг (удерживать)	Fine step (hold)
+Эту клавишу назначить нельзя	This key cannot be assigned
+Нужна обычная клавиша (можно вместе с Ctrl/Alt/Shift)	Needs a regular key (Ctrl/Alt/Shift allowed with it)
+Для этого действия — одна клавиша без Ctrl/Alt/Shift	This action takes a single key without Ctrl/Alt/Shift
+Игра не различает эту клавишу	The game cannot read this key
+Уже назначена: «%ls»	Already used by “%ls”
+\x2191 Вперёд	\x2191 Forward
+\x2190 Влево	\x2190 Left
+\x2193 Назад	\x2193 Back
+\x2192 Вправо	\x2192 Right
+Поворот \x2190	Rotate \x2190
+Поворот \x2192	Rotate \x2192
+Выше	Up
+Ниже	Down
+%s/%s/%s/%s — двигать · %s/%s — поворот · %s/%s — высота · %s — точно · %s — отпустить · %s — отмена	%s/%s/%s/%s — move · %s/%s — rotate · %s/%s — height · %s — fine · %s — release · %s — cancel
+Адреса игры ещё не найдены	Game addresses not resolved yet
+Не удалось прочитать заголовки exe игры	Could not read the game exe headers
+Испорчена сигнатура %s	Signature %s is malformed
+Сигнатура %s: %s	Signature %s: %s
+несколько совпадений	multiple matches
+не найдена	not found
+Сигнатура %s указывает не туда	Signature %s points to the wrong place
+Сигнатура %s: это не таблица методов	Signature %s: not a method table
+Слот клавиатуры: %s	Keyboard slot: %s
+не найден	not found
+Все адреса игры найдены по сигнатурам	All game addresses resolved by signatures
+KOTEuKA_CargoLoad — поиск адресов по сигнатурам\n	KOTEuKA_CargoLoad — signature address scan\n
+Результат: %s\n	Result: %s\n
+  (отличается от сборки 772884)	  (differs from build 772884)
+%-16s не найден\n	%-16s not found\n
+Грузовик не найден	No truck found
+Поиск камеры…	Searching for camera…
+Камера недоступна	Camera unavailable
+Рядом с камерой нет грузовика	No truck near the camera target
+Неясно: грузовики слишком близко	Unclear: trucks too close together
+Недоступно	Unavailable
+Неподдерживаемая версия игры	Unsupported game version
+Сначала загрузите карту	Load a map first
+Определяю текущий грузовик…	Finding the current truck…
+Не удалось определить грузовик. Нажмите «Обновить».	Could not identify the truck. Press “Refresh”.
+Грузовик или прицеп не найден.	No truck or trailer found.
+Найдено грузов: %d в радиусе %.0f м. Выберите груз на радаре.	Found %d cargo objects within %.0f m. Pick one on the radar.
+Отпустить	Release
+Погрузить	Load
+Выключена	Disabled
+Память позиции: ширина кузова %.1f м	Position memory: bed width %.1f m
+Память позиции включена: следующий груз встанет рядом с прошлым	Position memory on: next cargo goes next to the previous one
+Память позиции выключена: каждый груз ставится в одну точку	Position memory off: every cargo goes to the same spot
+Память позиции сброшена: следующий груз — первый в кузове	Position memory reset: next cargo is the first in the bed
+Сохранено: подъём %.1f м, смещение назад %.1f м (для следующей погрузки)	Saved: lift %.1f m, rear offset %.1f m (applies to the next load)
+Управление из игры недоступно — используйте кнопки радара.	In-game controls unavailable — use the radar buttons.
+Груз или карта изменились. Нажмите «Обновить».	Cargo or map changed. Press “Refresh”.
+Физика груза изменилась — размещение отменено.	Cargo physics changed — placement cancelled.
+Ждём физику. Нажмите Enter или «Отпустить» ещё раз.	Waiting for physics. Press release again.
+Отменить не удалось — нажмите «Отпустить».	Could not cancel — press “Release”.
+Размещение отменено, груз возвращён	Placement cancelled, cargo returned
+Груз отпущен — закрепите его в игре. В кузове уложено: %d	Cargo released — strap it in the game. Loaded in the bed: %d
+Высота %.2f м · Поворот %d° · Сдвиг %.2f / %.2f м · шаг %s · %s — отпустить	Height %.2f m · Turn %d° · Offset %.2f / %.2f m · %s step · %s — release
+точный	fine
+обычный	normal
+Клавиатура игры недоступна — используйте кнопки радара.	Game keyboard unavailable — use the radar buttons.
+Карта сменилась или версия игры не поддерживается.	Map changed or the game version is not supported.
+Грузовик сменился. Выберите груз заново.	Truck changed. Select the cargo again.
+Объект изменился. Нажмите «Обновить».	Object changed. Press “Refresh”.
+Грузовик изменился. Нажмите «Обновить».	Truck changed. Press “Refresh”.
+Груз изменился. Нажмите «Обновить».	Cargo changed. Press “Refresh”.
+Подъедьте ближе: груз должен быть не дальше %.0f м.	Drive closer: the cargo must be within %.0f m.
+Груз из нескольких частей — грузите краном.	Multi-part cargo — load it with the crane.
+Выберите свободно лежащий груз.	Select a loose cargo object.
+Игра не выделила память для операции	The game did not allocate memory for the operation
+Память позиции: место %d, %s. Поправьте при необходимости · %s — отпустить	Position memory: slot %d, %s. Adjust if needed · %s — release
+Бетонный лом	Concrete scrap
+Металлолом	Metal scrap
+Товар	Sellable
+Бетонная плита	Concrete slab
+Бетонная свая	Concrete pile
+Железная труба	Iron pipe
+Стальная балка	Steel beam
+Бревно	Log
+Неизвестный груз	Unknown cargo
+НЕТ АДРЕСОВ ИГРЫ	NO ADDRESSES
+ВЕРСИЯ НЕ ПОДХОДИТ	WRONG VERSION
+РАЗМЕЩЕНИЕ ГРУЗА	PLACING
+ГОТОВ	READY
+ОЖИДАНИЕ	WAITING
+ГРУЗОВИК	TRUCK
+СОСТОЯНИЕ	STATUS
+Грузов: %d	Cargo: %d
+%d м · зона погрузки	%d m · loading zone
+%d м	%d m
+перед	front
+Сядьте в грузовик и нажмите «Обновить».\nРадар появится, когда грузовик будет найден.	Get into a truck and press “Refresh”.\nThe radar appears once the truck is found.
+Клик — выбрать груз · колесо мыши — масштаб · %ls — скрыть	Click — select cargo · mouse wheel — zoom · %ls — hide
+%ls  ·  %d из %d	%ls  ·  %d of %d
+Груз над кузовом — выровняйте и нажмите %ls · %ls/X — точно	Cargo above the bed — line it up and press %ls · %ls/X — fine
+Расстояние %.1f м  ·  масса ≈ %.1f т	Distance %.1f m  ·  mass ≈ %.1f t
+Расстояние %.1f м	Distance %.1f m
+● можно грузить	● in range
+● дальше %.0f м	● beyond %.0f m
+Груз не выбран	No cargo selected
+Подъём	Lift
+Смещение назад	Rear offset
+%.1f м	%.1f m
+Автообновление	Auto refresh
+каждые %d с	every %d s
+вручную	manual
+Память позиции	Position memory
+выкл	off
+%d шт, %d яр.	%d pcs, layer %d
+%d шт	%d pcs
+пусто	empty
+\x2194 %.1f м	\x2194 %.1f m
+Щёлкните по клавише действия и нажмите новую.	Click an action's key, then press the new one.
+Нажмите…	Press a key…
+Сначала отпустите или отмените груз.	Release or cancel the cargo first.
+Назначение отменено.	Assignment cancelled.
+«%ls»: нажмите клавишу, можно с Ctrl/Alt/Shift	“%ls”: press a key, Ctrl/Alt/Shift allowed
+«%ls»: нажмите клавишу. Повторный щелчок — отмена.	“%ls”: press a key. Click again to cancel.
+Это сочетание уже занято другой программой — выберите другое.	Another program already uses this shortcut — pick a different one.
+Не удалось вернуть горячую клавишу окна.	Could not restore the window hotkey.
+«%ls» — %ls. Сохранено в .ini.	“%ls” — %ls. Saved to .ini.
+F1 занята другой программой — назначьте окну другую клавишу.	F1 is used by another program — assign the window a different key.
+Все клавиши возвращены по умолчанию.	All keys reset to defaults.
+геймпад не меняется: LB+RB+Y, D-pad, LT/RT, A, X	gamepad is fixed: LB+RB+Y, D-pad, LT/RT, A, X
+KOTEuKA_CargoLoad — клавиши	KOTEuKA_CargoLoad — keys
+По умолчанию	Defaults
+Закрыть	Close
+Часть значений в .ini не распознана — для них взяты стандартные.	Some .ini values were not recognised — defaults used for them.
+Обновить	Refresh
+« Предыдущий	« Previous
+Следующий »	Next »
+\x2191 Вперёд  W	\x2191 Forward  W
+\x2190 Влево  A	\x2190 Left  A
+\x2193 Назад  S	\x2193 Back  S
+\x2192 Вправо  D	\x2192 Right  D
+Поворот \x2190  Q	Rotate \x2190  Q
+Поворот \x2192  E	Rotate \x2192  E
+Выше  R	Up  R
+Ниже  F	Down  F
+Сохранённая клавиша окна занята другой программой — временно F1	The saved window key is used by another program — F1 for now
+Горячая клавиша окна занята другой программой — откройте окно геймпадом (LB+RB+Y)	The window hotkey is used by another program — open it with the gamepad (LB+RB+Y)

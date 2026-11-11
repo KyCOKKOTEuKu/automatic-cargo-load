@@ -1,1 +1,10 @@
-/build/
+# Собранные файлы — выкладываются в Releases, не в репозиторий
+build/
+*.dll
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.log
+__pycache__/
