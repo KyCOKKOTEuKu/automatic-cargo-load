@@ -23,7 +23,7 @@ static void pump(int ms){DWORD end=GetTickCount()+ms;MSG m;while(GetTickCount()<
 int wmain(int argc,WCHAR **argv){
  static const WCHAR *labels[]={L"Погрузить",L"Обновить",L"« Предыдущий",L"Следующий »",
   L"\x2191 Вперёд  W",L"\x2190 Влево  A",L"\x2193 Назад  S",L"\x2192 Вправо  D",
-  L"Поворот \x2190  Q",L"Поворот \x2192  E",L"Выше  R",L"Ниже  F"};
+  L"Поворот \x2190  Q",L"Поворот \x2192  E",L"Выше  R",L"Ниже  F",L"Наклон \x2190  Z",L"Наклон \x2192  C",L"Наклон \x2191  T",L"Наклон \x2193  G"};
  static BYTE fakeBase[0x2cd40c0+16];
  static const BYTE sig[]={0x48,0x8b,0x89,0xd8,0,0,0,0xe9,0xd4,0xd4,3,0};
  static const struct { const char *label; float x,z,ax,az; } demo[]={
@@ -44,13 +44,14 @@ int wmain(int argc,WCHAR **argv){
  fitClient(window);
  /* ── Тесты клавиш ── */
  {
-  static const BYTE originalScan[10]={0x11,0x1e,0x1f,0x20,0x10,0x12,0x13,0x21,0x1c,0x01};
-  static const BYTE originalVk[10]={'W','A','S','D','Q','E','R','F',VK_RETURN,VK_ESCAPE};
+  /* Исходная таблица + наклон Z/C/T/G (DIK 0x2C/0x2E/0x14/0x22) перед Enter/Esc. */
+  static const BYTE originalScan[14]={0x11,0x1e,0x1f,0x20,0x10,0x12,0x13,0x21,0x2c,0x2e,0x14,0x22,0x1c,0x01};
+  static const BYTE originalVk[14]={'W','A','S','D','Q','E','R','F','Z','C','T','G',VK_RETURN,VK_ESCAPE};
   int k,bad=0,roundTrip=0;
   UINT vk,mods;
   WCHAR name[32],err[96];
   loadKeyBindings();applyPlacementKeys();
-  for(k=0;k<10;k++)if(placementKeys[k].scan!=originalScan[k] || placementKeys[k].key!=originalVk[k]){bad++;printf("key %d: vk=%02X scan=%02X\n",k,placementKeys[k].key,placementKeys[k].scan);}
+  for(k=0;k<14;k++)if(placementKeys[k].scan!=originalScan[k] || placementKeys[k].key!=originalVk[k]){bad++;printf("key %d: vk=%02X scan=%02X\n",k,placementKeys[k].key,placementKeys[k].scan);}
   printf("defaults = original table: %s\n",bad?"FAILED":"PASSED");
   printf("fineScan=%02X (ожидается 2A), DIK: Up=%02X Left=%02X Num5=%02X NumDiv=%02X F1=%02X Space=%02X\n",
          fineScan,dikFor(VK_UP),dikFor(VK_LEFT),dikFor(VK_NUMPAD5),dikFor(VK_DIVIDE),dikFor(VK_F1),dikFor(VK_SPACE));
@@ -92,6 +93,8 @@ int wmain(int argc,WCHAR **argv){
  }
  /* Состояние 1: грузовик не найден */
  detectedTruck="Ожидание карты";strcpy(message,"Сначала загрузите карту");
+ /* Строка «Сеть» на снимке: режим «Хост», один друг с модом. */
+ netMode=NET_HOST;peers[0].used=1;peers[0].transport=NT_STEAM;peers[0].isClient=1;peers[0].lastSeen=GetTickCount();lstrcpyA(peers[0].name,"Friend");
  placementControls();ShowWindow(window,SW_SHOW);pump(400);save(window,argv[1]);
  /* Состояние 2: найдено 8 грузов */
  memset(&truck,0,sizeof(truck));truck.pose[10]=1;truckReady=1;detectedTruck="Voron 3327 Cargo";

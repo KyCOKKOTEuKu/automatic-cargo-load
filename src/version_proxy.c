@@ -57,8 +57,16 @@ BOOL WINAPI VerQueryValueW(LPVOID p,LPWSTR s,LPVOID *out,PUINT n){
  typedef BOOL(WINAPI *Fn)(LPCVOID,LPCWSTR,LPVOID*,PUINT);
  Fn f=(Fn)resolve("VerQueryValueW");return f?f(p,s,out,n):FALSE;
 }
+/* Только в самой игре: version.dll подхватывают и Roadcraft.exe, crash_reporter.exe, редактор. */
+static BOOL isGameProcess(void){
+ WCHAR path[MAX_PATH];DWORD n=GetModuleFileNameW(0,path,MAX_PATH),i;const WCHAR *name=path;
+ if(!n || n>=MAX_PATH)return FALSE;
+ for(i=0;i<n;i++)if(path[i]==L'\\' || path[i]==L'/')name=path+i+1;
+ return !lstrcmpiW(name,L"Roadcraft - Retail.exe");
+}
 static DWORD WINAPI loadAutoload(void *arg){
  WCHAR path[MAX_PATH];DWORD n=GetModuleFileNameW(own,path,MAX_PATH);DWORD i=n;
+ if(!isGameProcess())return 0;
  if(!n || n>=MAX_PATH)return 1;
  while(i && path[i-1]!=L'\\')i--;
  if(!i || i+24>=MAX_PATH)return 1;

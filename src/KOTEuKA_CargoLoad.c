@@ -1,6 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <stdarg.h>
 #include <stdint.h>
+#pragma comment(lib,"ws2_32.lib")
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +23,7 @@ typedef struct {
  int firstHull,hullCount,minHullCount,multipleBodies,forward,up;
 } CargoAsset;
 #include "cargo_catalog.inc"
-typedef struct { const char *bone; float mass,bedZ; int hasBed; const char *label; } TruckProfile;
+typedef struct TruckProfileTag { const char *bone; float mass,bedZ; int hasBed; const char *label; } TruckProfile;
 typedef struct { Item item; const TruckProfile *profile; } TruckTarget;
 static const TruckProfile truckProfiles[]={
 #include "truck_platforms.inc"
@@ -57,14 +61,31 @@ typedef struct {
  int turnSteps;
  float sizeForward,sizeOther; /* длина и ширина груза в осях кузова при повороте 0 */
  int newLayer;                /* раскладка начала новый ярус */
+ int tiltSteps;               /* наклон влево/вправо — вокруг продольной оси грузовика, шаги по 5° */
+ int pitchSteps;              /* наклон вперёд/назад — вокруг поперечной оси грузовика, шаги по 5° */
+ /* Составной груз: остальные тела, связанные с главным шарнирами Havok, и их исходные позы. */
+ int partCount;
+ uintptr_t parts[31];
+ BYTE partMotion[31];
+ Vec partPosition[31],partRotation[31];
+ int mode;                   /* PM_LOCAL — свой груз, PM_REMOTE — хост двигает груз друга, PM_CLIENT — команды уходят хосту */
+ int peer;                    /* для PM_REMOTE: номер друга в peers[] */
 } Placement;
+enum { PM_LOCAL, PM_REMOTE, PM_CLIENT };
 static Placement placement;
+/* Сеть (net.inc): клиент пересылает команды хосту, хост выполняет их у себя. */
+static int netExecuting;      /* 1 — сейчас выполняется команда друга (на хосте) */
+static int netClientActive(void);
+static void netClientLoad(int kind,Vec cargo,Vec truckCenter,const struct TruckProfileTag *profile);
+static void netClientNudge(int direction,int fine);
+static void netClientFinish(int cancel);
+static void netClientBedReset(void);
 /* ───── Раскладка в кузове ─────
    Запоминаем, что уже уложено в текущий грузовик: края ряда поперёк кузова,
    смещение вдоль и поворот последнего груза. Следующий груз ставится вплотную
    с той стороны, что ближе к центру; если ряд заполнен — снова в центр,
    и груз ложится сверху (новый ярус). Ширина кузова задаётся пользователем. */
-typedef struct { uintptr_t truckBody; int count,layer; float left,right,along; int turnSteps; } BedLayout;
+typedef struct { uintptr_t truckBody; int count,layer; float left,right,along; int turnSteps,tiltSteps,pitchSteps; } BedLayout;
 static BedLayout bed;
 static int bedLayoutOn=1;
 static float bedWidth=2.4f;
@@ -83,14 +104,14 @@ static void recordBed(void){
   if(lo<bed.left)bed.left=lo;
   if(hi>bed.right)bed.right=hi;
  }
- bed.count++;bed.along=placement.along;bed.turnSteps=placement.turnSteps;
+ bed.count++;bed.along=placement.along;bed.turnSteps=placement.turnSteps;bed.tiltSteps=placement.tiltSteps;bed.pitchSteps=placement.pitchSteps;
 }
 /* Подбирает смещения для нового груза. Возвращает текст для подсказки. */
 static const char *planBed(Placement *next){
  float w,half=bedWidth/2,right,left;
  int rightFits,leftFits;
  if(!bedLayoutOn || !bed.count || bed.truckBody!=truck.body)return 0;
- next->along=bed.along;next->turnSteps=bed.turnSteps;
+ next->along=bed.along;next->turnSteps=bed.turnSteps;next->tiltSteps=bed.tiltSteps;next->pitchSteps=bed.pitchSteps;
  w=widthAcross(next);
  right=bed.right+bedGap+w/2;left=bed.left-bedGap-w/2;
  rightFits=right+w/2<=half+0.01f;leftFits=left-w/2>=-half-0.01f;
@@ -99,15 +120,17 @@ static const char *planBed(Placement *next){
  next->across=0;next->newLayer=1;
  return TR("ряд заполнен — по центру, новым ярусом сверху","row is full — centred, new layer on top");
 }
-enum { RADAR_WIDTH=520, RADAR_HEIGHT=858, HEADER_BOTTOM=46, INFO_TOP=54, INFO_BOTTOM=136,
+enum { RADAR_WIDTH=520, RADAR_HEIGHT=942, HEADER_BOTTOM=46, INFO_TOP=54, INFO_BOTTOM=136,
        MAP_LEFT=12, MAP_TOP=144, MAP_RIGHT=508, MAP_BOTTOM=484, MAP_CX=260, MAP_CY=314,
        SEL_TOP=492, SEL_BOTTOM=546, LEGEND_TOP=554, SETTINGS_TOP=602, SETTINGS_BOTTOM=638,
-       AUTO_TOP=646, AUTO_BOTTOM=682, BED_TOP=690, BED_BOTTOM=726, BUTTONS_TOP=734 };
+       AUTO_TOP=646, AUTO_BOTTOM=682, BED_TOP=690, BED_BOTTOM=726, NET_TOP=734, NET_BOTTOM=770,
+       BUTTONS_TOP=778 };
 /* Ползунок автообновления радара: 0 — вручную, 1..5 — каждые N секунд. */
 enum { SLIDER_LEFT=262, SLIDER_STEP=44, SLIDER_MAX=5, SLIDER_CY=AUTO_TOP+13 };
 static int autoRefresh,sliderDragging;
 /* Кнопки настроек: подъём −/+, смещение назад −/+, ширина кузова −/+, раскладка вкл/выкл, сброс. */
-enum { HEIGHT_DOWN=130, HEIGHT_UP, REAR_DOWN, REAR_UP, BED_NARROW, BED_WIDEN, BED_TOGGLE, BED_RESET, KEYS_BUTTON, LANG_RU, LANG_EN };
+enum { HEIGHT_DOWN=130, HEIGHT_UP, REAR_DOWN, REAR_UP, BED_NARROW, BED_WIDEN, BED_TOGGLE, BED_RESET, KEYS_BUTTON, LANG_RU, LANG_EN,
+       NETB_OFF, NETB_HOST, NETB_CLIENT, NETB_SETUP };
 typedef struct { int id,left,width,top,bottom; const WCHAR *label,*labelEn; } SettingButton;
 static const SettingButton settingButtons[]={
  {HEIGHT_DOWN,196,30,SETTINGS_TOP+6,SETTINGS_BOTTOM-6,L"\x2212",L"\x2212"},
@@ -120,15 +143,20 @@ static const SettingButton settingButtons[]={
  {BED_RESET,  430,68,BED_TOP+6,BED_BOTTOM-6,L"Сброс",L"Reset"},
  {LANG_RU,    348,34,9,37,L"RU",L"RU"},
  {LANG_EN,    384,34,9,37,L"EN",L"EN"},
- {KEYS_BUTTON,426,82,9,37,L"Клавиши",L"Keys"}
+ {KEYS_BUTTON,426,82,9,37,L"Клавиши",L"Keys"},
+ {NETB_OFF,   92,52,NET_TOP+6,NET_BOTTOM-6,L"Выкл",L"Off"},
+ {NETB_HOST,  148,52,NET_TOP+6,NET_BOTTOM-6,L"Хост",L"Host"},
+ {NETB_CLIENT,204,64,NET_TOP+6,NET_BOTTOM-6,L"Клиент",L"Client"},
+ {NETB_SETUP, 438,60,NET_TOP+6,NET_BOTTOM-6,L"IP…",L"IP…"}
 };
 enum { SETTING_COUNT=sizeof(settingButtons)/sizeof(settingButtons[0]) };
-enum { MOVE_FORWARD=105,MOVE_LEFT,MOVE_BACK,MOVE_RIGHT,TURN_LEFT,TURN_RIGHT,RAISE_CARGO,LOWER_CARGO };
-enum { HOTKEY_RADAR=1, PLACEMENT_TIMER=1, GAMEPAD_TIMER=2, CURSOR_TIMER=3, REFRESH_TIMER=4 };
+enum { MOVE_FORWARD=105,MOVE_LEFT,MOVE_BACK,MOVE_RIGHT,TURN_LEFT,TURN_RIGHT,RAISE_CARGO,LOWER_CARGO,TILT_LEFT,TILT_RIGHT,PITCH_FORWARD,PITCH_BACK };
+enum { HOTKEY_RADAR=1, PLACEMENT_TIMER=1, GAMEPAD_TIMER=2, CURSOR_TIMER=3, REFRESH_TIMER=4, NET_TIMER=5 };
 typedef struct { BYTE key,scan; int direction; } PlacementKey;
 static PlacementKey placementKeys[]={
  {'W',0x11,MOVE_FORWARD},{'A',0x1e,MOVE_LEFT},{'S',0x1f,MOVE_BACK},{'D',0x20,MOVE_RIGHT},
  {'Q',0x10,TURN_LEFT},{'E',0x12,TURN_RIGHT},{'R',0x13,RAISE_CARGO},{'F',0x21,LOWER_CARGO},
+ {'Z',0x2c,TILT_LEFT},{'C',0x2e,TILT_RIGHT},{'T',0x14,PITCH_FORWARD},{'G',0x22,PITCH_BACK},
  {VK_RETURN,0x1c,0},{VK_ESCAPE,0x01,0}
 };
 enum { PLACEMENT_KEY_COUNT=sizeof(placementKeys)/sizeof(placementKeys[0]) };
@@ -140,10 +168,13 @@ typedef struct { DWORD packet; PadInput input; } PadSample;
 typedef DWORD (WINAPI *PadGetState)(DWORD,PadSample*);
 enum { PAD_UP=1,PAD_DOWN=2,PAD_LEFT=4,PAD_RIGHT=8,PAD_LB=0x100,PAD_RB=0x200,
        PAD_LT=0x400,PAD_RT=0x800,PAD_A=0x1000,PAD_X=0x4000,PAD_Y=0x8000,
+       PAD_TILT_L=0x40,PAD_TILT_R=0x80, /* правый стик влево/вправо (на месте нажатий стиков) */
+       PAD_PITCH_F=0x10,PAD_PITCH_B=0x20, /* правый стик вверх/вниз (на месте Start/Back) */
        PAD_OPEN=PAD_LB|PAD_RB|PAD_Y,PAD_DPAD=PAD_UP|PAD_DOWN|PAD_LEFT|PAD_RIGHT };
 static const struct { WORD button; int direction; } padMoves[]={
  {PAD_UP,MOVE_FORWARD},{PAD_DOWN,MOVE_BACK},{PAD_LEFT,MOVE_LEFT},{PAD_RIGHT,MOVE_RIGHT},
- {PAD_LB,LOWER_CARGO},{PAD_RB,RAISE_CARGO},{PAD_LT,TURN_LEFT},{PAD_RT,TURN_RIGHT}
+ {PAD_LB,LOWER_CARGO},{PAD_RB,RAISE_CARGO},{PAD_LT,TURN_LEFT},{PAD_RT,TURN_RIGHT},
+ {PAD_TILT_L,TILT_LEFT},{PAD_TILT_R,TILT_RIGHT},{PAD_PITCH_F,PITCH_FORWARD},{PAD_PITCH_B,PITCH_BACK}
 };
 typedef struct {
  WORD previous,repeating;
@@ -158,7 +189,7 @@ static int padFilterReady;
 static volatile LONG padChordHeld;
 static const DWORD radarStyle=WS_CAPTION|WS_SYSMENU|WS_THICKFRAME|WS_CLIPCHILDREN;
 static const int buttonIds[]={104,101,102,103,MOVE_FORWARD,MOVE_LEFT,MOVE_BACK,MOVE_RIGHT,
-                              TURN_LEFT,TURN_RIGHT,RAISE_CARGO,LOWER_CARGO};
+                              TURN_LEFT,TURN_RIGHT,RAISE_CARGO,LOWER_CARGO,TILT_LEFT,TILT_RIGHT,PITCH_FORWARD,PITCH_BACK};
 enum { BUTTON_COUNT=sizeof(buttonIds)/sizeof(buttonIds[0]) };
 static HFONT buttonFont;
 static HCURSOR radarCursor;
@@ -248,7 +279,7 @@ static WCHAR ini[MAX_PATH];
    K_FORWARD..K_CANCEL — клавиши размещения груза; они же по порядку лежат в placementKeys[].
    K_FINE — клавиша точного шага (удерживать). */
 enum { K_RADAR, K_FORWARD, K_LEFT, K_BACK, K_RIGHT, K_TURN_LEFT, K_TURN_RIGHT, K_RAISE, K_LOWER,
-       K_RELEASE, K_CANCEL, K_FINE, KEY_COUNT };
+       K_TILT_LEFT, K_TILT_RIGHT, K_PITCH_FORWARD, K_PITCH_BACK, K_RELEASE, K_CANCEL, K_FINE, KEY_COUNT };
 enum { PK_RELEASE=K_RELEASE-1, PK_CANCEL=K_CANCEL-1 };
 typedef struct { const WCHAR *iniName,*title,*titleEn; UINT defaultVk; UINT vk,mods; } KeyBinding;
 static KeyBinding keyBindings[KEY_COUNT]={
@@ -261,13 +292,17 @@ static KeyBinding keyBindings[KEY_COUNT]={
  {L"TurnRight",  L"Повернуть вправо",L"Rotate right",            'E'},
  {L"Raise",      L"Поднять выше",L"Raise",                'R'},
  {L"Lower",      L"Опустить ниже",L"Lower",               'F'},
+ {L"TiltLeft",   L"Наклонить влево",L"Tilt left",           'Z'},
+ {L"TiltRight",  L"Наклонить вправо",L"Tilt right",          'C'},
+ {L"PitchForward",L"Наклонить вперёд",L"Tilt forward",       'T'},
+ {L"PitchBack",  L"Наклонить назад",L"Tilt back",            'G'},
  {L"Release",    L"Отпустить груз",L"Release cargo",              VK_RETURN},
  {L"Cancel",     L"Отменить и вернуть груз",L"Cancel and return cargo",     VK_ESCAPE},
  {L"Fine",       L"Точный шаг (удерживать)",L"Fine step (hold)",     VK_SHIFT}
 };
 static const WCHAR *keyTitle(int i){return uiLang?keyBindings[i].titleEn:keyBindings[i].title;}
 static BYTE fineScan;
-static char keyHintU8[260];
+static char keyHintU8[360];
 /* Окно «Клавиши» (сам код окна — ниже, перед обработчиком окна радара). */
 enum { KEYS_ROW_ID=200 };
 static HWND keysWindow;
@@ -417,9 +452,9 @@ static void loadKeyBindings(void){
  saveKeyBindings();
 }
 static const WCHAR *const moveLabels[]={L"\x2191 Вперёд",L"\x2190 Влево",L"\x2193 Назад",L"\x2192 Вправо",
-                                        L"Поворот \x2190",L"Поворот \x2192",L"Выше",L"Ниже"};
+                                        L"Поворот \x2190",L"Поворот \x2192",L"Выше",L"Ниже",L"Наклон \x2190",L"Наклон \x2192",L"Наклон \x2191",L"Наклон \x2193"};
 static const WCHAR *const moveLabelsEn[]={L"\x2191 Forward",L"\x2190 Left",L"\x2193 Back",L"\x2192 Right",
-                                          L"Rotate \x2190",L"Rotate \x2192",L"Up",L"Down"};
+                                          L"Rotate \x2190",L"Rotate \x2192",L"Up",L"Down",L"Tilt \x2190",L"Tilt \x2192",L"Tilt \x2191",L"Tilt \x2193"};
 /* Переносит назначения в таблицу размещения, подписи кнопок, заголовок и подсказки. */
 static void applyPlacementKeys(void){
  char n[K_FINE+1][32];
@@ -431,12 +466,12 @@ static void applyPlacementKeys(void){
  }
  fineScan=dikFor(keyBindings[K_FINE].vk);
  for(i=0;i<=K_FINE;i++)bindingTextU8(i,n[i],32);
- _snprintf(keyHintU8,sizeof(keyHintU8),TR("%s/%s/%s/%s — двигать · %s/%s — поворот · %s/%s — высота · %s — точно · %s — отпустить · %s — отмена","%s/%s/%s/%s — move · %s/%s — rotate · %s/%s — height · %s — fine · %s — release · %s — cancel"),
-           n[K_FORWARD],n[K_LEFT],n[K_BACK],n[K_RIGHT],n[K_TURN_LEFT],n[K_TURN_RIGHT],n[K_RAISE],n[K_LOWER],
+ _snprintf(keyHintU8,sizeof(keyHintU8),TR("%s/%s/%s/%s — двигать · %s/%s — поворот · %s/%s/%s/%s — наклон · %s/%s — высота · %s — точно · %s — отпустить · %s — отмена","%s/%s/%s/%s — move · %s/%s — rotate · %s/%s/%s/%s — tilt · %s/%s — height · %s — fine · %s — release · %s — cancel"),
+           n[K_FORWARD],n[K_LEFT],n[K_BACK],n[K_RIGHT],n[K_TURN_LEFT],n[K_TURN_RIGHT],n[K_TILT_LEFT],n[K_TILT_RIGHT],n[K_PITCH_FORWARD],n[K_PITCH_BACK],n[K_RAISE],n[K_LOWER],
            n[K_FINE],n[K_RELEASE],n[K_CANCEL]);
  keyHintU8[sizeof(keyHintU8)-1]=0;
  if(!window)return;
- for(i=0;i<8;i++){
+ for(i=0;i<12;i++){
   bindingTextW(K_FORWARD+i,key,48);
   _snwprintf(label,64,L"%ls  %ls",uiLang?moveLabelsEn[i]:moveLabels[i],key);label[63]=0;
   SetWindowTextW(GetDlgItem(window,MOVE_FORWARD+i),label);
@@ -950,7 +985,7 @@ static void orderCargo(void){
 static void refresh(void){
  uintptr_t islands[4096],bodies[4096],previousWorld=world;
  int ni,i,j,k,bn,pass;
- if(placement.body)return;
+ if(placement.body && placement.mode!=PM_REMOTE)return;
  count=0;selected=-1;truckReady=0;truckCount=0;
  readProfiles();
  if(!signature()){detectedTruck=TR("Недоступно","Unavailable");strcpy(message,gameAddrReady?TR("Неподдерживаемая версия игры","Unsupported game version"):gameAddrError);return;}
@@ -1066,9 +1101,11 @@ static void submitPose(uintptr_t body,void *pair){
  submitBodyOperation(op,body);
 }
 static void placementControls(void){
- int i,active=placement.body!=0;
- SetWindowTextW(GetDlgItem(window,104),active?TR(L"Отпустить",L"Release"):TR(L"Погрузить",L"Load"));
- for(i=1;i<BUTTON_COUNT;i++)EnableWindow(GetDlgItem(window,buttonIds[i]),i<4?!active:active);
+ /* Пока хост двигает груз друга, свои кнопки размещения у хоста неактивны. */
+ int i,remote=placement.body && placement.mode==PM_REMOTE,active=placement.body && !remote;
+ SetWindowTextW(GetDlgItem(window,104),remote?TR(L"Друг грузит…",L"Friend loading…"):active?TR(L"Отпустить",L"Release"):TR(L"Погрузить",L"Load"));
+ EnableWindow(GetDlgItem(window,104),!remote);
+ for(i=1;i<BUTTON_COUNT;i++)EnableWindow(GetDlgItem(window,buttonIds[i]),i<4?!active && !remote:active);
  for(i=0;i<BUTTON_COUNT;i++)InvalidateRect(GetDlgItem(window,buttonIds[i]),0,FALSE);
  for(i=0;i<SETTING_COUNT;i++)EnableWindow(GetDlgItem(window,settingButtons[i].id),!active);
  SetWindowTextW(GetDlgItem(window,BED_TOGGLE),bedLayoutOn?TR(L"Включена",L"Enabled"):TR(L"Выключена",L"Disabled"));
@@ -1100,6 +1137,7 @@ static void changeSetting(int id){
   return;
  case BED_RESET:
   ZeroMemory(&bed,sizeof(bed));
+  if(netClientActive())netClientBedReset();
   strcpy(message,TR("Память позиции сброшена: следующий груз — первый в кузове","Position memory reset: next cargo is the first in the bed"));
   InvalidateRect(window,0,TRUE);
   return;
@@ -1238,6 +1276,7 @@ static DWORD WINAPI filterGamepad(DWORD index,PadSample *sample){
  if(foreground==target){
   sample->input.buttons&=~(PAD_DPAD|PAD_LB|PAD_RB|PAD_A|PAD_X);
   sample->input.lt=sample->input.rt=0;
+  sample->input.rx=sample->input.ry=0; /* правый стик — наклон груза */
  }
  return result;
 }
@@ -1297,6 +1336,14 @@ static int placementMotion(BYTE *motion){
 static int finishPlacement(int cancel){
  BYTE motion;
  if(!placement.body)return 1;
+ /* Груз друга отпускает/отменяет только его команда, а не кнопки или закрытие окна хоста. */
+ if(placement.mode==PM_REMOTE && !netExecuting)return 1;
+ if(placement.mode==PM_CLIENT){
+  netClientFinish(cancel);
+  placement.body=0;placement.mode=PM_LOCAL;
+  placementControls();
+  return 1;
+ }
  if(!placementMotion(&motion)){
   strcpy(message,TR("Груз или карта изменились. Нажмите «Обновить».","Cargo or map changed. Press “Refresh”."));
  }else{
@@ -1316,52 +1363,112 @@ static int finishPlacement(int cancel){
      return 0;
     }
     submitPose(placement.body,pair);
-    logs[selected].center=placement.originalCenter;
-    logs[selected].axis=placement.originalAxis;
+    if(placement.mode==PM_LOCAL && selected>=0){
+     logs[selected].center=placement.originalCenter;
+     logs[selected].axis=placement.originalAxis;
+    }
    }
    changeMotion(placement.body,placement.originalMotion);
    stopMotion(placement.body);
+   {int i;
+    for(i=0;i<placement.partCount;i++){
+     if(cancel){void *pair=allocatePose(placement.partPosition[i],placement.partRotation[i]);if(pair)submitPose(placement.parts[i],pair);}
+     changeMotion(placement.parts[i],placement.partMotion[i]);
+     stopMotion(placement.parts[i]);
+    }}
    if(!cancel)recordBed();
    if(cancel)strcpy(message,TR("Размещение отменено, груз возвращён","Placement cancelled, cargo returned"));
    else sprintf(message,TR("Груз отпущен — закрепите его в игре. В кузове уложено: %d","Cargo released — strap it in the game. Loaded in the bed: %d"),bed.count);
   }
  }
- placement.body=0;
- orderCargo();
+ {int local=placement.mode==PM_LOCAL;
+  placement.body=0;placement.mode=PM_LOCAL;
+  if(local)orderCargo();} /* груз друга не пересортировывает список грузов хоста */
  placementControls();
  return 1;
 }
+/* Кватернионы (x,y,z,w), произведение Гамильтона; поворот вектора v' = q·v·q*. */
+static void quatMul(const Vec *a,const Vec *b,Vec *out){
+ Vec r;
+ r.x=a->w*b->x+a->x*b->w+a->y*b->z-a->z*b->y;
+ r.y=a->w*b->y-a->x*b->z+a->y*b->w+a->z*b->x;
+ r.z=a->w*b->z+a->x*b->y-a->y*b->x+a->z*b->w;
+ r.w=a->w*b->w-a->x*b->x-a->y*b->y-a->z*b->z;
+ *out=r;
+}
+static void quatRotate(const Vec *q,const Vec *v,Vec *out){
+ Vec p={v->x,v->y,v->z,0},c={-q->x,-q->y,-q->z,q->w},t;
+ quatMul(q,&p,&t);quatMul(&t,&c,out);out->w=0;
+}
+/* Добавочный поворот груза по трём осям грузовика, шаги по 5°:
+   1) курс (turnSteps) — вокруг вертикали;
+   2) наклон влево/вправо (tiltSteps) — вокруг продольной оси (forwardX,0,forwardZ);
+   3) наклон вперёд/назад (pitchSteps) — вокруг поперечной оси (−forwardZ,0,forwardX),
+      +шаг поднимает перед груза, −шаг опускает. */
+static void placementDelta(const Placement *t,Vec *delta){
+ const double k=3.141592653589793/72.0;
+ double hy=t->turnSteps*k,ht=t->tiltSteps*k,hp=t->pitchSteps*k;
+ Vec yaw={0,(float)sin(hy),0,(float)cos(hy)};
+ Vec tilt={(float)(sin(ht)*t->forwardX),0,(float)(sin(ht)*t->forwardZ),(float)cos(ht)};
+ Vec pitch={(float)(-sin(hp)*t->forwardZ),0,(float)(sin(hp)*t->forwardX),(float)cos(hp)};
+ Vec rollYaw;
+ quatMul(&tilt,&yaw,&rollYaw);
+ quatMul(&pitch,&rollYaw,delta);
+}
 static void adjustedPose(const Placement *target,Vec *position,Vec *rotation,Vec *center,Vec *axis){
- /* turnSteps — шаги по 5° (72 шага на полный оборот). */
+ /* turnSteps/tiltSteps — шаги по 5° (72 шага на полный оборот). */
  double halfAngle=target->turnSteps*(3.141592653589793/72.0);
  float s=sin(halfAngle),c=cos(halfAngle),yawSin=2*s*c,yawCos=1-2*s*s;
- float ox=target->position.x-target->center.x;
- float oz=target->position.z-target->center.z;
- Vec original=target->rotation;
+ Vec delta,offset,rotated;
+ placementDelta(target,&delta);
  *center=target->center;
  center->x+=target->along*target->forwardX-target->across*target->forwardZ;
  center->z+=target->along*target->forwardZ+target->across*target->forwardX;
  center->y+=target->lift;
- /* The body origin may differ from the center of mass. Rotate that offset too. */
- position->x=center->x+yawCos*ox+yawSin*oz;
- position->y=target->position.y+target->lift;
- position->z=center->z-yawSin*ox+yawCos*oz;
+ /* Начало тела может не совпадать с центром масс — поворачиваем и это смещение (вращение вокруг центра масс). */
+ offset.x=target->position.x-target->center.x;
+ offset.y=target->position.y-target->center.y;
+ offset.z=target->position.z-target->center.z;
+ offset.w=0;
+ quatRotate(&delta,&offset,&rotated);
+ position->x=center->x+rotated.x;
+ position->y=center->y+rotated.y;
+ position->z=center->z+rotated.z;
  position->w=0;
- rotation->x=c*original.x+s*original.z;
- rotation->y=c*original.y+s*original.w;
- rotation->z=c*original.z-s*original.x;
- rotation->w=c*original.w-s*original.y;
+ quatMul(&delta,&target->rotation,rotation);
  axis->x=yawCos*target->forwardX+yawSin*target->forwardZ;
  axis->y=0;
  axis->z=-yawSin*target->forwardX+yawCos*target->forwardZ;
  axis->w=0;
 }
+/* Составной груз: ставит остальные части так же, как сдвинулось главное тело
+   (одно жёсткое перемещение D = новый поворот · исходный поворот⁻¹). */
+static int submitParts(const Placement *p,Vec mainPosition,Vec mainRotation){
+ Vec inverse={-p->originalRotation.x,-p->originalRotation.y,-p->originalRotation.z,p->originalRotation.w},delta;
+ int i;
+ if(!p->partCount)return 1;
+ quatMul(&mainRotation,&inverse,&delta);
+ for(i=0;i<p->partCount;i++){
+  Vec offset,rotated,position,rotation;
+  void *pair;
+  offset.x=p->partPosition[i].x-p->originalPosition.x;
+  offset.y=p->partPosition[i].y-p->originalPosition.y;
+  offset.z=p->partPosition[i].z-p->originalPosition.z;
+  offset.w=0;
+  quatRotate(&delta,&offset,&rotated);
+  position.x=mainPosition.x+rotated.x;position.y=mainPosition.y+rotated.y;position.z=mainPosition.z+rotated.z;position.w=0;
+  quatMul(&delta,&p->partRotation[i],&rotation);
+  if(!(pair=allocatePose(position,rotation)))return 0;
+  submitPose(p->parts[i],pair);
+ }
+ return 1;
+}
 static volatile LONG padFineHeld;
 /* Точный режим: зажат Shift на клавиатуре или X на геймпаде. */
 static int fineStep(void){return (GetAsyncKeyState(keyBindings[K_FINE].vk)&0x8000) || InterlockedCompareExchange(&padFineHeld,0,0);}
 static int wrapTurn(int t){t%=72;if(t>=36)t-=72;if(t<-36)t+=72;return t;}
-static void nudgePlacement(int direction){
- const int fine=fineStep();
+/* fine — точный шаг; у хоста для груза друга берётся из команды друга. */
+static void nudgePlacementEx(int direction,int fine){
  const float step=fine?0.05f:0.25f;
  const int turn=fine?1:3;
  const float horizontalLimit=25.0f;
@@ -1370,9 +1477,12 @@ static void nudgePlacement(int direction){
  Placement next;
  void *pair;
  if(!placement.body)return;
+ if(placement.mode==PM_REMOTE && !netExecuting)return;
+ if(placement.mode==PM_CLIENT){netClientNudge(direction,fine);return;}
  if(!placementMotion(&motion)){
+  int local=placement.mode==PM_LOCAL;
   finishPlacement(0);
-  showRadar();
+  if(local)showRadar();
   return;
  }
  if(motion!=4)return;
@@ -1386,6 +1496,10 @@ static void nudgePlacement(int direction){
  case TURN_RIGHT:next.turnSteps=wrapTurn(next.turnSteps-turn);break;
  case RAISE_CARGO:next.lift+=step;break;
  case LOWER_CARGO:next.lift-=step;break;
+ case TILT_LEFT:next.tiltSteps=wrapTurn(next.tiltSteps+turn);break;
+ case TILT_RIGHT:next.tiltSteps=wrapTurn(next.tiltSteps-turn);break;
+ case PITCH_FORWARD:next.pitchSteps=wrapTurn(next.pitchSteps-turn);break; /* перед груза вниз */
+ case PITCH_BACK:next.pitchSteps=wrapTurn(next.pitchSteps+turn);break;    /* перед груза вверх */
  default:return;
  }
  if(absf(next.along)>horizontalLimit || absf(next.across)>horizontalLimit)return;
@@ -1394,14 +1508,18 @@ static void nudgePlacement(int direction){
  pair=allocatePose(position,rotation);
  if(!pair)return;
  submitPose(placement.body,pair);
+ submitParts(&next,position,rotation);
  placement=next;
- logs[selected].center=center;
- logs[selected].axis=axis;
+ if(placement.mode==PM_LOCAL && selected>=0){
+  logs[selected].center=center;
+  logs[selected].axis=axis;
+ }
  {char release[32];bindingTextU8(K_RELEASE,release,32);
- sprintf(message,TR("Высота %.2f м · Поворот %d° · Сдвиг %.2f / %.2f м · шаг %s · %s — отпустить","Height %.2f m · Turn %d° · Offset %.2f / %.2f m · %s step · %s — release"),
-         height+next.lift,next.turnSteps*5,next.along,next.across,fine?TR("точный","fine"):TR("обычный","normal"),release);}
+ sprintf(message,TR("Высота %.2f м · Поворот %d° · Наклон %d° / %d° · Сдвиг %.2f / %.2f м · шаг %s · %s — отпустить","Height %.2f m · Turn %d° · Tilt %d° / %d° · Offset %.2f / %.2f m · %s step · %s — release"),
+         height+next.lift,next.turnSteps*5,next.tiltSteps*5,next.pitchSteps*5,next.along,next.across,fine?TR("точный","fine"):TR("обычный","normal"),release);}
  InvalidateRect(window,0,TRUE);
 }
+static void nudgePlacement(int direction){nudgePlacementEx(direction,fineStep());}
 static void pollPlacementKeys(void){
  DWORD now=GetTickCount();
  LONG pressed,held;
@@ -1439,14 +1557,127 @@ static void pollPlacementKeys(void){
  }
  placementKeysReady=1;
 }
+/* Составной груз (разбитая техника и т.п.): обходим шарниры Havok от главного тела
+   (тот же список связей +0x110 и VT_CONSTRAINT, по которому мод сцепляет прицеп) и
+   собираем все свободные тела группы. Не берём: грузовики/прицепы (ремни ведут к ним),
+   неподвижные тела, тела дальше 12 м от главного. Возвращает число найденных частей
+   (без главного) или -1, если частей больше, чем помещается в таблицу. */
+static int collectParts(uintptr_t mainBody,const Item *mainItem,uintptr_t truckBody,Placement *next){
+ uintptr_t queue[32];
+ int head=0,tail=1,i;
+ queue[0]=mainBody;
+ next->partCount=0;
+ while(head<tail){
+  uintptr_t body=queue[head++],links[64];
+  int n=array(body+0x110,links,64),j;
+  for(j=0;j<n;j++){
+   uintptr_t data[8],other;
+   Item item;
+   Vec inertia;
+   BYTE motion;
+   float dx,dy,dz;
+   if(!readmem(links[j],data,sizeof(data)) || data[0]!=gameAddr[VT_CONSTRAINT])continue;
+   if(data[6]==body)other=data[7];
+   else if(data[7]==body)other=data[6];
+   else continue;
+   if(!other || other==truckBody)continue;
+   for(i=0;i<tail;i++)if(queue[i]==other)break;
+   if(i<tail)continue;
+   if(!pose(other,&item) || !readmem(other+0x220,&inertia,16) || !readmem(other+0x168,&motion,1))continue;
+   if(truckProfileFor(other,inertia))continue;
+   if(motion!=1 && motion!=2 && motion!=3 && motion!=6)continue;
+   dx=item.center.x-mainItem->center.x;dy=item.center.y-mainItem->center.y;dz=item.center.z-mainItem->center.z;
+   if(dx*dx+dy*dy+dz*dz>12.0f*12.0f)continue;
+   if(tail>=32 || next->partCount>=(int)(sizeof(next->parts)/sizeof(next->parts[0])))return -1;
+   queue[tail++]=other;
+   i=next->partCount++;
+   next->parts[i]=other;
+   next->partMotion[i]=motion;
+   memcpy(&next->partPosition[i],&item.pose[12],16);
+   next->partPosition[i].w=0;
+   if(!readmem(other+0x1e0,&next->partRotation[i],16))return -1;
+  }
+ }
+ return next->partCount;
+}
+/* Поднимает груз cargoBody над кузовом грузовика t (профиль — truckProfile, память — bed).
+   Общая часть для своей погрузки (PM_LOCAL) и для погрузки по команде друга на хосте (PM_REMOTE).
+   Возвращает 1, если груз поднят; иначе пишет причину в message. */
+static int beginPlacement(uintptr_t cargoBody,int kind,Vec axis,const Item *truckItem,int mode){
+ Item current,t=*truckItem;
+ Placement next={0};
+ Vec com,inertia;
+ void *pair;
+ int forward,up,upSign;
+ float headingLength;
+ if(!pose(cargoBody,&current) || !readmem(cargoBody+0x220,&inertia,16)){strcpy(message,TR("Объект изменился. Нажмите «Обновить».","Object changed. Press “Refresh”."));return 0;}
+ if(kind>=FIRST_ASSET_KIND && cargoAssets[kind-FIRST_ASSET_KIND].multipleBodies
+    && collectParts(cargoBody,&current,t.body,&next)<0){
+  strcpy(message,TR("Слишком много частей у груза (больше 31) — грузите краном.","The cargo has too many parts (over 31) — load it with the crane."));
+  return 0;
+ }
+ if(!readmem(cargoBody+0x168,&next.originalMotion,1)
+    || (next.originalMotion!=1 && next.originalMotion!=2 && next.originalMotion!=3 && next.originalMotion!=6)){
+  strcpy(message,TR("Выберите свободно лежащий груз.","Select a loose cargo object."));
+  return 0;
+ }
+ next.body=cargoBody;
+ next.mode=mode;
+ if(!readmem(cargoBody+0x20,&next.shape,8)
+    || !readmem(cargoBody+0x1e0,&next.originalRotation,16)
+    || !readmem(cargoBody+0x1f0,&com,16)){strcpy(message,TR("Объект изменился. Нажмите «Обновить».","Object changed. Press “Refresh”."));return 0;}
+ memcpy(&next.originalPosition,&current.pose[12],16);
+ next.originalPosition.w=0;
+ next.originalCenter=current.center;
+ next.originalAxis=axis;
+ forward=cargoForward(kind,inertia);
+ up=kind>=FIRST_ASSET_KIND?cargoAssets[kind-FIRST_ASSET_KIND].up:kind?profiles[kind-1].up:2;
+ upSign=kind?1:-1;
+ if(!cargoLoadingPose(&t,truckProfile,com,forward,up,upSign,&next.position,&next.rotation,&next.center)){strcpy(message,TR("Не удалось рассчитать место над кузовом.","Could not compute the spot above the bed."));return 0;}
+ headingLength=length(t.pose[8],t.pose[10]);
+ next.forwardX=t.pose[8]/headingLength;next.forwardZ=t.pose[10]/headingLength;
+ {
+  float size[3];
+  const char *bedNote;
+  Vec startPosition=next.position,startRotation=next.rotation,startCenter=next.center,startAxis;
+  if(cargoSize(cargoBody,size)){next.sizeForward=size[forward];next.sizeOther=size[3-forward-up];}
+  else{next.sizeForward=2.0f;next.sizeOther=1.0f;} /* форма неизвестного типа — условные габариты */
+  bedNote=planBed(&next);
+  if(next.along!=0 || next.across!=0 || next.turnSteps || next.tiltSteps || next.pitchSteps)adjustedPose(&next,&startPosition,&startRotation,&startCenter,&startAxis);
+  pair=allocatePose(startPosition,startRotation);
+  if(!pair){strcpy(message,TR("Игра не выделила память для операции","The game did not allocate memory for the operation"));return 0;}
+  stopMotion(cargoBody);
+  changeMotion(cargoBody,4);
+  submitPose(cargoBody,pair);
+  {int i;for(i=0;i<next.partCount;i++){stopMotion(next.parts[i]);changeMotion(next.parts[i],4);}}
+  submitParts(&next,startPosition,startRotation);
+  placement=next;
+  if(mode==PM_LOCAL && selected>=0){
+   logs[selected].center=startCenter;
+   logs[selected].axis.x=placement.forwardX;logs[selected].axis.z=placement.forwardZ;
+  }
+  if(bedNote){char release[32];bindingTextU8(K_RELEASE,release,32);
+   sprintf(message,TR("Память позиции: место %d, %s. Поправьте при необходимости · %s — отпустить","Position memory: slot %d, %s. Adjust if needed · %s — release"),bed.count+1,bedNote,release);}
+  else lstrcpynA(message,keyHintU8,sizeof(message));
+  if(next.partCount){
+   char text[sizeof(message)];
+   _snprintf(text,sizeof(text),TR("Составной груз: %d частей вместе · %s","Multi-part cargo: %d parts together · %s"),next.partCount+1,message);
+   text[sizeof(text)-1]=0;
+   lstrcpynA(message,text,sizeof(message));
+  }
+ }
+ return 1;
+}
 static void loadSelected(void){
  Item current,t;
- Placement next={0};
- Vec com,inertia,truckInertia;
- void *pair;
- int kind,forward,up,upSign,detected;
- float headingLength;
+ Vec inertia,truckInertia;
+ int kind,detected;
  uintptr_t userdata;
+ if(placement.body && placement.mode==PM_REMOTE){
+  strcpy(message,TR("Сейчас друг размещает груз через ваш мод — подождите.","A friend is placing cargo through your mod — please wait."));
+  InvalidateRect(window,0,TRUE);
+  return;
+ }
  if(placement.body){finishPlacement(0);return;}
  if(selected<0 || !selectedBody || !truckReady)return;
  if(!currentWorld()){strcpy(message,TR("Карта сменилась или версия игры не поддерживается.","Map changed or the game version is not supported."));goto done;}
@@ -1467,51 +1698,12 @@ static void loadSelected(void){
   goto done;
  }
  kind=logs[selected].kind;
- if(kind>=FIRST_ASSET_KIND && cargoAssets[kind-FIRST_ASSET_KIND].multipleBodies){
-  strcpy(message,TR("Груз из нескольких частей — грузите краном.","Multi-part cargo — load it with the crane."));
-  goto done;
+ /* Клиент мультиплеера: физикой управляет хост, поэтому только отправляем ему запрос. */
+ if(netClientActive()){netClientLoad(kind,current.center,t.center,truckProfile);goto done;}
+ if(beginPlacement(selectedBody,kind,logs[selected].axis,&t,PM_LOCAL)){
+  placementControls();
+  focusGameForPlacement();
  }
- if(!readmem(selectedBody+0x168,&next.originalMotion,1)
-    || (next.originalMotion!=1 && next.originalMotion!=2 && next.originalMotion!=3 && next.originalMotion!=6)){
-  strcpy(message,TR("Выберите свободно лежащий груз.","Select a loose cargo object."));
-  goto done;
- }
- next.body=selectedBody;
- if(!readmem(selectedBody+0x20,&next.shape,8)
-    || !readmem(selectedBody+0x1e0,&next.originalRotation,16)
-    || !readmem(selectedBody+0x1f0,&com,16))return;
- memcpy(&next.originalPosition,&current.pose[12],16);
- next.originalPosition.w=0;
- next.originalCenter=current.center;
- next.originalAxis=logs[selected].axis;
- forward=cargoForward(kind,inertia);
- up=kind>=FIRST_ASSET_KIND?cargoAssets[kind-FIRST_ASSET_KIND].up:kind?profiles[kind-1].up:2;
- upSign=kind?1:-1;
- if(!cargoLoadingPose(&t,truckProfile,com,forward,up,upSign,&next.position,&next.rotation,&next.center))return;
- headingLength=length(t.pose[8],t.pose[10]);
- next.forwardX=t.pose[8]/headingLength;next.forwardZ=t.pose[10]/headingLength;
- {
-  float size[3];
-  const char *bedNote;
-  Vec startPosition=next.position,startRotation=next.rotation,startCenter=next.center,startAxis;
-  if(cargoSize(selectedBody,size)){next.sizeForward=size[forward];next.sizeOther=size[3-forward-up];}
-  else{next.sizeForward=2.0f;next.sizeOther=1.0f;} /* форма неизвестного типа — условные габариты */
-  bedNote=planBed(&next);
-  if(next.along!=0 || next.across!=0 || next.turnSteps)adjustedPose(&next,&startPosition,&startRotation,&startCenter,&startAxis);
-  pair=allocatePose(startPosition,startRotation);
-  if(!pair){strcpy(message,TR("Игра не выделила память для операции","The game did not allocate memory for the operation"));goto done;}
-  stopMotion(selectedBody);
-  changeMotion(selectedBody,4);
-  submitPose(selectedBody,pair);
-  placement=next;
-  logs[selected].center=startCenter;
-  logs[selected].axis.x=placement.forwardX;logs[selected].axis.z=placement.forwardZ;
-  if(bedNote){char release[32];bindingTextU8(K_RELEASE,release,32);
-   sprintf(message,TR("Память позиции: место %d, %s. Поправьте при необходимости · %s — отпустить","Position memory: slot %d, %s. Adjust if needed · %s — release"),bed.count+1,bedNote,release);}
-  else lstrcpynA(message,keyHintU8,sizeof(message));
- }
- placementControls();
- focusGameForPlacement();
 done:InvalidateRect(window,0,TRUE);
 }
 static void openRadarFrom(HWND foreground){
@@ -1532,7 +1724,7 @@ static void pollGamepad(void){
  HWND foreground=GetForegroundWindow();
  DWORD now=GetTickCount(),pid=0,index;
  int radarFocused=foreground==window;
- int positioning=placement.body && (radarFocused || foreground==gameWindow);
+ int positioning=placement.body && placement.mode!=PM_REMOTE && (radarFocused || foreground==gameWindow);
  GetWindowThreadProcessId(foreground,&pid);
  if((LONG)(now-retryPadFilter)>=0 || !retryPadFilter){
   padFilterReady=installGamepadFilter();
@@ -1547,6 +1739,13 @@ static void pollGamepad(void){
   held=sample.input.buttons & ~(PAD_LT|PAD_RT);
   if(sample.input.lt>30)held|=PAD_LT;
   if(sample.input.rt>30)held|=PAD_RT;
+  /* Наклон — правый стик: влево/вправо и вверх (вперёд)/вниз (назад).
+     Биты нажатий стиков и Start/Back моду не нужны — на их месте стик. */
+  held&=~(PAD_TILT_L|PAD_TILT_R|PAD_PITCH_F|PAD_PITCH_B);
+  if(sample.input.rx<-20000)held|=PAD_TILT_L;
+  else if(sample.input.rx>20000)held|=PAD_TILT_R;
+  if(sample.input.ry>20000)held|=PAD_PITCH_F;
+  else if(sample.input.ry<-20000)held|=PAD_PITCH_B;
   previous=pad->connected?pad->previous:held;
   pressed=held & ~previous;
   pad->connected=1;
@@ -1594,6 +1793,7 @@ static void pollGamepad(void){
 #define COL_MAP     RGB(17,27,24)
 #define COL_GRID    RGB(38,58,50)
 #define COL_RING    RGB(52,82,70)
+#include "net.inc"
 static void mapPoint(Vec p,int *x,int *y){float fx=truck.pose[8],fz=truck.pose[10],n=length(fx,fz),dx=p.x-truck.center.x,dz=p.z-truck.center.z;if(n<.1f)n=1;fx/=n;fz/=n;*x=MAP_CX-(int)((dx*fz-dz*fx)*mapScale);*y=MAP_CY-(int)((dx*fx+dz*fz)*mapScale);}
 enum MarkerShape { MARK_RECT, MARK_CIRCLE, MARK_TRIANGLE, MARK_DIAMOND };
 typedef struct {
@@ -1713,6 +1913,7 @@ static void paintCargo(HDC dc,int i){
 static void statusInfo(const WCHAR **text,COLORREF *color){
  if(!gameAddrReady){*text=TR(L"НЕТ АДРЕСОВ",L"NO ADDRESSES");*color=COL_BAD;}
  else if(!signature()){*text=TR(L"НЕ ТА ВЕРСИЯ",L"WRONG VERSION");*color=COL_BAD;}
+ else if(placement.body && placement.mode==PM_REMOTE){*text=TR(L"ДРУГ ГРУЗИТ",L"FRIEND LOADING");*color=COL_ACCENT;}
  else if(placement.body){*text=TR(L"РАЗМЕЩЕНИЕ",L"PLACING");*color=COL_ACCENT;}
  else if(truckReady){*text=TR(L"ГОТОВ",L"READY");*color=COL_GOOD;}
  else{*text=TR(L"ОЖИДАНИЕ",L"WAITING");*color=COL_WARN;}
@@ -1940,6 +2141,15 @@ static void paint(HWND h){
  SetRect(&r,206,BED_TOP,258,BED_BOTTOM);
  textW(dc,wide,&r,DT_SINGLELINE|DT_VCENTER|DT_RIGHT,COL_MUTED);
 
+ /* Сеть: режим и состояние связи с другом */
+ fillRound(dc,MAP_LEFT,NET_TOP,MAP_RIGHT,NET_BOTTOM,12,COL_CARD,COL_BORDER);
+ SelectObject(dc,small);
+ SetRect(&r,26,NET_TOP,88,NET_BOTTOM);
+ textW(dc,TR(L"Сеть",L"Network"),&r,DT_SINGLELINE|DT_VCENTER,COL_MUTED);
+ {COLORREF c;netStatusText(wide,256,&c);
+  SetRect(&r,276,NET_TOP,432,NET_BOTTOM);
+  textW(dc,wide,&r,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS,c);}
+
  SelectObject(dc,oldFont);
  DeleteObject(title);DeleteObject(normal);DeleteObject(small);DeleteObject(bold);
  SetMapMode(dc,MM_TEXT);
@@ -1954,7 +2164,8 @@ static void drawButton(const DRAWITEMSTRUCT *d){
  WCHAR label[64];
  RECT r=d->rcItem;
  int inKeys=keysWindow && GetParent(d->hwndItem)==keysWindow;
- int primary=inKeys?(keyCaptureRow>=0 && (int)d->CtlID==KEYS_ROW_ID+keyCaptureRow):(d->CtlID==104 || (d->CtlID==BED_TOGGLE && bedLayoutOn) || (d->CtlID==LANG_RU && !uiLang) || (d->CtlID==LANG_EN && uiLang)),disabled=(d->itemState&ODS_DISABLED)!=0,pressed=(d->itemState&ODS_SELECTED)!=0;
+ int primary=inKeys?(keyCaptureRow>=0 && (int)d->CtlID==KEYS_ROW_ID+keyCaptureRow):(d->CtlID==104 || (d->CtlID==BED_TOGGLE && bedLayoutOn) || (d->CtlID==LANG_RU && !uiLang) || (d->CtlID==LANG_EN && uiLang)
+                || (d->CtlID==NETB_OFF && netMode==NET_OFF) || (d->CtlID==NETB_HOST && netMode==NET_HOST) || (d->CtlID==NETB_CLIENT && netMode==NET_CLIENT)),disabled=(d->itemState&ODS_DISABLED)!=0,pressed=(d->itemState&ODS_SELECTED)!=0;
  COLORREF fill=primary?COL_ACCENT:COL_CARD,border=primary?COL_ACCENT:COL_BORDER,color=primary?RGB(24,20,14):COL_TEXT;
  HBRUSH bg=CreateSolidBrush(COL_BG);
  HGDIOBJ oldFont=0;
@@ -2081,7 +2292,7 @@ static void keysPaint(HWND h){
  textW(dc,TR(L"Клавиши",L"Keys"),&r,DT_SINGLELINE|DT_VCENTER,COL_TEXT);
  SelectObject(dc,small);
  SetRect(&r,120,0,KEYS_W-16,43);
- textW(dc,TR(L"геймпад не меняется: LB+RB+Y, D-pad, LT/RT, A, X",L"gamepad is fixed: LB+RB+Y, D-pad, LT/RT, A, X"),&r,DT_SINGLELINE|DT_VCENTER|DT_RIGHT,COL_MUTED);
+ textW(dc,TR(L"геймпад: LB+RB+Y, D-pad, LT/RT, правый стик, A, X",L"gamepad: LB+RB+Y, D-pad, LT/RT, right stick, A, X"),&r,DT_SINGLELINE|DT_VCENTER|DT_RIGHT,COL_MUTED);
  SelectObject(dc,normal);
  for(i=0;i<KEYS_ROW_COUNT;i++){
   int top=KEYS_ROW_TOP+i*KEYS_ROW_H;
@@ -2163,6 +2374,7 @@ static void openKeysWindow(void){
  ShowWindow(keysWindow,SW_SHOW);
  SetForegroundWindow(keysWindow);
 }
+#include "net_ui.inc"
 /* Язык интерфейса: [UI] Language=ru|en; без записи — по языку Windows. */
 static void loadLanguage(void){
  WCHAR v[8];
@@ -2189,6 +2401,7 @@ static void setLanguage(int english){
  uiLang=english;
  WritePrivateProfileStringW(L"UI",L"Language",uiLang?L"en":L"ru",ini);
  if(reopenKeys)DestroyWindow(keysWindow);
+ if(netWindow)DestroyWindow(netWindow);
  applyLanguageTexts();
  if(!placement.body && gameAddrReady)refresh();
  strcpy(message,TR("Язык интерфейса: русский","Interface language: English"));
@@ -2237,11 +2450,15 @@ static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){int i;
   case 103:cycle(1);break;
   case 104:loadSelected();break;
   case MOVE_FORWARD:case MOVE_LEFT:case MOVE_BACK:case MOVE_RIGHT:
-  case TURN_LEFT:case TURN_RIGHT:case RAISE_CARGO:case LOWER_CARGO:
+  case TURN_LEFT:case TURN_RIGHT:case RAISE_CARGO:case LOWER_CARGO:case TILT_LEFT:case TILT_RIGHT:case PITCH_FORWARD:case PITCH_BACK:
    nudgePlacement(id);break;
   case HEIGHT_DOWN:case HEIGHT_UP:case REAR_DOWN:case REAR_UP:
   case KEYS_BUTTON:openKeysWindow();break;
   case LANG_RU:case LANG_EN:setLanguage(id==LANG_EN);break;
+  case NETB_OFF:netSetMode(NET_OFF);break;
+  case NETB_HOST:netSetMode(NET_HOST);break;
+  case NETB_CLIENT:netSetMode(NET_CLIENT);break;
+  case NETB_SETUP:openNetWindow();break;
   case BED_NARROW:case BED_WIDEN:case BED_TOGGLE:case BED_RESET:
    changeSetting(id);break;
   }
@@ -2292,6 +2509,7 @@ static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){int i;
  if(m==WM_TIMER && w==PLACEMENT_TIMER){pollPlacementKeys();return 0;}
  if(m==WM_TIMER && w==GAMEPAD_TIMER){pollGamepad();return 0;}
  if(m==WM_TIMER && w==CURSOR_TIMER){revealRadarCursor(0);return 0;}
+ if(m==WM_TIMER && w==NET_TIMER){netTick();return 0;}
  if(m==WM_HOTKEY && w==HOTKEY_RADAR){
   DWORD pid=0;
   HWND foreground=GetForegroundWindow();
@@ -2310,7 +2528,7 @@ static DWORD WINAPI run(void *arg){
  DpiContextFn setDpiContext=(DpiContextFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),"SetThreadDpiAwarenessContext");
  static const WCHAR *labels[]={L"Погрузить",L"Обновить",L"« Предыдущий",L"Следующий »",
                               L"\x2191 Вперёд  W",L"\x2190 Влево  A",L"\x2193 Назад  S",L"\x2192 Вправо  D",
-                              L"Поворот \x2190  Q",L"Поворот \x2192  E",L"Выше  R",L"Ниже  F"};
+                              L"Поворот \x2190  Q",L"Поворот \x2192  E",L"Выше  R",L"Ниже  F",L"Наклон \x2190  Z",L"Наклон \x2192  C",L"Наклон \x2191  T",L"Наклон \x2193  G"};
  if(setDpiContext)setDpiContext((HANDLE)(intptr_t)-4);
  base=(BYTE*)GetModuleHandleW(0);n=GetModuleFileNameW(self,ini,MAX_PATH);if(!n || n>=MAX_PATH)return 1;while(n && ini[n-1]!=L'\\')n--;ini[n]=0;lstrcpyW(profilePath,ini);lstrcatW(profilePath,L"KOTEuKA_CargoLoad.profiles");lstrcatW(ini,L"KOTEuKA_CargoLoad.ini");
  loadLanguage();
@@ -2348,6 +2566,7 @@ static DWORD WINAPI run(void *arg){
   else{keyBindings[K_RADAR].vk=oldVk;keyBindings[K_RADAR].mods=oldMods;strcpy(message,TR("Горячая клавиша окна занята другой программой — откройте окно геймпадом (LB+RB+Y)","The window hotkey is used by another program — open it with the gamepad (LB+RB+Y)"));}
  }
  applyLanguageTexts();
+ {WCHAR logPath[MAX_PATH];lstrcpyW(logPath,profilePath);lstrcpyW(logPath+lstrlenW(logPath)-8,L"log");netStart(logPath);}
  xinput=LoadLibraryExW(L"XInput1_4.dll",0,0x800); /* LOAD_LIBRARY_SEARCH_SYSTEM32 */
  if(xinput)readPad=(PadGetState)GetProcAddress(xinput,"XInputGetState");
  if(readPad)SetTimer(window,GAMEPAD_TIMER,15,0);
@@ -2356,7 +2575,7 @@ static DWORD WINAPI run(void *arg){
    if(msg.message==WM_KEYDOWN || msg.message==WM_SYSKEYDOWN){keysCapture((UINT)msg.wParam);continue;}
    if(msg.message==WM_KEYUP || msg.message==WM_SYSKEYUP || msg.message==WM_CHAR || msg.message==WM_SYSCHAR)continue;
   }
-  if(placement.body && msg.message==WM_KEYDOWN && (msg.hwnd==window || IsChild(window,msg.hwnd))){
+  if(placement.body && placement.mode!=PM_REMOTE && msg.message==WM_KEYDOWN && (msg.hwnd==window || IsChild(window,msg.hwnd))){
    int direction=placementDirection((DWORD)msg.wParam);
    if(direction){nudgePlacement(direction);continue;}
    if(msg.wParam==placementKeys[PK_CANCEL].key || msg.wParam==placementKeys[PK_RELEASE].key){
@@ -2401,9 +2620,17 @@ __declspec(dllexport) const char *testTruckTarget(uintptr_t body,float *inertia,
 __declspec(dllexport) void testReadProfiles(WCHAR *path){lstrcpynW(profilePath,path,MAX_PATH);readProfiles();}
 __declspec(dllexport) int testCargoKind(uintptr_t body,float *v,uintptr_t userdata){Vec inertia;memcpy(&inertia,v,16);return cargoKind(body,inertia,userdata);}
 #endif
+/* version.dll из папки игры подхватывают и другие программы оттуда (Roadcraft.exe, crash_reporter.exe,
+   редактор). Мод работает только в самой игре: иначе лишние окна, горячие клавиши, сеть и журнал. */
+static int isGameProcess(void){
+ WCHAR path[MAX_PATH];DWORD n=GetModuleFileNameW(0,path,MAX_PATH);const WCHAR *name=path;DWORD i;
+ if(!n || n>=MAX_PATH)return 0;
+ for(i=0;i<n;i++)if(path[i]==L'\\' || path[i]==L'/')name=path+i+1;
+ return !lstrcmpiW(name,L"Roadcraft - Retail.exe");
+}
 BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID reserved){if(reason==DLL_PROCESS_ATTACH){self=h;DisableThreadLibraryCalls(h);
 #ifndef AUTOLOAD_TEST
- {HANDLE t=CreateThread(0,0,run,0,0,0);if(t)CloseHandle(t);}
+ if(isGameProcess()){HANDLE t=CreateThread(0,0,run,0,0,0);if(t)CloseHandle(t);}
 #endif
  }return TRUE;}
 
